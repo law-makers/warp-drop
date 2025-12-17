@@ -8,7 +8,8 @@ const (
 )
 
 var (
-	ReadTimeout  = 30 * time.Second
-	WriteTimeout = 30 * time.Second
-	IdleTimeout  = 60 * time.Second
+	// Generous timeouts for large file transfers (gigabytes over slower connections)
+	ReadTimeout  = 10 * time.Minute
+	WriteTimeout = 15 * time.Minute
+	IdleTimeout  = 5 * time.Minute
 )

@@ -109,7 +109,9 @@ func Receive(url string, outputPath string, force bool, progress io.Writer) (str
 		// Start progress tracking from existing bytes if resuming
 		src = &progressReader{r: downloadResp.Body, total: totalSize, read: startByte, out: progress, start: time.Now()}
 	}
-	if _, err := io.Copy(f, src); err != nil { return "", err }
+	// Use larger buffer for faster I/O on large files
+	buf := make([]byte, 1<<20) // 1MB buffer
+	if _, err := io.CopyBuffer(f, src, buf); err != nil { return "", err }
 	return outputPath, nil
 }
 

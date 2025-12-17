@@ -44,9 +44,12 @@ func (s *Server) Start() (string, error) {
 	}
 
 	s.httpServer = &http.Server{
-		ReadTimeout:  protocol.ReadTimeout,
-		WriteTimeout: protocol.WriteTimeout,
-		Handler:      mux,
+		ReadTimeout:       protocol.ReadTimeout,
+		ReadHeaderTimeout: 30 * time.Second,
+		WriteTimeout:      protocol.WriteTimeout,
+		IdleTimeout:       protocol.IdleTimeout,
+		MaxHeaderBytes:    1 << 20, // 1MB
+		Handler:           mux,
 	}
 
 	ln, err := net.Listen("tcp", fmt.Sprintf("%s:0", ip.String()))
@@ -481,8 +484,11 @@ function uploadFile(file, idx){
 		return
 	}
 
-	// Parse multipart form; keep 128MB in memory, rest spills to temp files
-	if err := r.ParseMultipartForm(128 << 20); err != nil {
+	// Set max upload size to 10GB for large file support
+	r.Body = http.MaxBytesReader(w, r.Body, 10<<30) // 10GB limit
+
+	// Parse multipart form; keep 256MB in memory, rest spills to temp files
+	if err := r.ParseMultipartForm(256 << 20); err != nil {
 		log.Printf("Failed to parse multipart form: %v", err)
 		http.Error(w, "invalid form", http.StatusBadRequest)
 		return
@@ -514,7 +520,9 @@ function uploadFile(file, idx){
 			http.Error(w, "write error", http.StatusInternalServerError)
 			return
 		}
-		n, err := io.Copy(out, src)
+		// Use larger buffer for better performance on large files
+		buf := make([]byte, 1<<20) // 1MB buffer
+		n, err := io.CopyBuffer(out, src, buf)
 		cerr := out.Close()
 		if err != nil || cerr != nil {
 			log.Printf("Failed to write file %s: write_err=%v, close_err=%v", name, err, cerr)
