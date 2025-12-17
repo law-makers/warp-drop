@@ -12,9 +12,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zulfikawr/warp-drop/internal/client"
-	"github.com/zulfikawr/warp-drop/internal/crypto"
-	"github.com/zulfikawr/warp-drop/internal/server"
+	"github.com/zulfikawr/warp/internal/client"
+	"github.com/zulfikawr/warp/internal/crypto"
+	"github.com/zulfikawr/warp/internal/server"
 )
 
 func TestE2E_FileTransfer(t *testing.T) {

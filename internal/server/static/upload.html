@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>~/warp/drop</title>
+<style>
+:root {
+  /* ANSI Color Map */
+  --bg: #000000;
+  --c-reset: #e5e5e5;
+  --c-bold: #ffffff;
+  --c-dim: #555555;
+  --c-green: #00ff41; 
+  --c-yellow: #f1c40f;
+  --c-magenta: #ff00ff;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'Courier New', Courier, 'Lucida Console', monospace;
+  background: var(--bg);
+  color: var(--c-reset);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  line-height: 1.4;
+}
+
+.terminal {
+  width: 100%;
+  max-width: 600px;
+}
+
+/* Typography & Layout */
+h1 {
+  font-size: 1rem;
+  color: var(--c-magenta);
+  font-weight: normal;
+  margin-bottom: 1rem;
+}
+
+.prompt::before {
+  content: "user@warp:~$ ";
+  color: var(--c-green);
+}
+
+.subtitle {
+  color: var(--c-dim);
+  font-size: 0.85rem;
+  margin-bottom: 1.5rem;
+  display: block;
+}
+
+/* Upload Zone - styled as a defined memory block */
+.upload-zone {
+  border: 1px dashed var(--c-dim);
+  padding: 2rem 1rem;
+  text-align: center;
+  cursor: pointer;
+  margin-bottom: 1.5rem;
+  position: relative;
+  transition: all 0.1s;
+}
+
+.upload-zone:hover, .upload-zone.dragover {
+  border-color: var(--c-green);
+  background: rgba(0, 255, 65, 0.05);
+}
+
+.upload-zone.dragover::after {
+  content: "[ DROP_INCOMING_DATA ]";
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--bg);
+  color: var(--c-green);
+  padding: 0.5rem;
+}
+
+.icon-ascii {
+  display: block;
+  color: var(--c-dim);
+  margin-bottom: 1rem;
+  white-space: pre;
+  font-size: 0.7rem;
+  line-height: 1;
+}
+
+.upload-text {
+  color: var(--c-bold);
+  font-size: 0.9rem;
+}
+
+.upload-hint {
+  color: var(--c-dim);
+  font-size: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+input[type=file] { display: none; }
+
+/* File List - Styled as `ls -l` output */
+.file-list {
+  margin-bottom: 1.5rem;
+  border-top: 1px solid var(--c-dim);
+  padding-top: 1rem;
+}
+
+.file-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 1rem;
+  font-size: 0.85rem;
+}
+
+.file-header {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  margin-bottom: 0.25rem;
+}
+
+.file-name {
+  color: var(--c-reset);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 70%;
+}
+
+.file-size {
+  color: var(--c-dim);
+}
+
+.remove-btn {
+  background: none;
+  border: none;
+  color: var(--c-magenta);
+  cursor: pointer;
+  font-family: inherit;
+  margin-left: 1rem;
+  font-size: 1rem;
+}
+.remove-btn:hover {
+  background: var(--c-magenta);
+  color: var(--bg);
+}
+
+/* Progress Bar - Blocky style */
+.progress-container {
+  width: 100%;
+  height: 12px;
+  background: var(--c-dim);
+  margin-top: 2px;
+  position: relative;
+}
+
+.progress-bar {
+  height: 100%;
+  background: var(--c-green);
+  width: 0%;
+  transition: width 0.2s linear;
+}
+
+.speed-text {
+  color: var(--c-yellow);
+  font-size: 0.75rem;
+  margin-top: 4px;
+  text-align: right;
+  width: 100%;
+  display: block;
+}
+
+/* Actions */
+.btn {
+  width: 100%;
+  background: transparent;
+  color: var(--c-green);
+  border: 1px solid var(--c-green);
+  padding: 1rem;
+  font-family: inherit;
+  font-size: 1rem;
+  cursor: pointer;
+  text-transform: uppercase;
+  font-weight: bold;
+  letter-spacing: 1px;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--c-green);
+  color: var(--bg);
+}
+
+.btn:disabled {
+  border-color: var(--c-dim);
+  color: var(--c-dim);
+  cursor: not-allowed;
+}
+
+/* Footer */
+.footer {
+  margin-top: 2rem;
+  border-top: 1px solid var(--c-dim);
+  padding-top: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--c-dim);
+  display: flex;
+  justify-content: space-between;
+}
+
+/* Blinking Cursor Utility */
+.cursor::after {
+  content: '█';
+  animation: blink 1s step-end infinite;
+  color: var(--c-green);
+  margin-left: 5px;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+</style>
+</head>
+<body>
+
+<div class="terminal">
+  <h1 class="prompt">./warp_drop --secure</h1>
+  <span class="subtitle">// Transfer files securely via raw stream. No caching.</span>
+  
+  <form method="POST" enctype="multipart/form-data" id="uploadForm">
+    
+    <div class="upload-zone" id="dropZone">
+      <div class="icon-ascii">
+   _   _  
+  | | | | 
+  | |_| | 
+   \___/  
+      </div>
+      <div class="upload-text">[ SELECT OR DRAG FILES ]</div>
+      <div class="upload-hint">>> awaiting input stream...</div>
+    </div>
+
+    <input type="file" name="file" id="fileInput" multiple required>
+    
+    <div class="file-list" id="fileList"></div>
+    
+    <button type="submit" class="btn" id="submitBtn" disabled>[ INITIALIZE UPLOAD ]</button>
+  </form>
+  
+  <div class="footer">
+    <span>STATUS: IDLE</span>
+    <span class="cursor">_</span>
+  </div>
+</div>
+
+<script>
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+const fileList = document.getElementById('fileList');
+const submitBtn = document.getElementById('submitBtn');
+const footerStatus = document.querySelector('.footer span:first-child');
+let selectedFiles = [];
+
+// Interaction Logic
+dropZone.addEventListener('click', () => fileInput.click());
+
+fileInput.addEventListener('change', e => {
+  handleFiles(e.target.files);
+});
+
+['dragenter', 'dragover', 'dragleave', 'drop'].forEach(evt => {
+  dropZone.addEventListener(evt, e => {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+});
+
+['dragenter', 'dragover'].forEach(evt => {
+  dropZone.addEventListener(evt, () => dropZone.classList.add('dragover'));
+});
+
+['dragleave', 'drop'].forEach(evt => {
+  dropZone.addEventListener(evt, () => dropZone.classList.remove('dragover'));
+});
+
+dropZone.addEventListener('drop', e => {
+  const files = e.dataTransfer.files;
+  handleFiles(files);
+});
+
+function handleFiles(files) {
+  selectedFiles = Array.from(files);
+  updateFileList();
+  submitBtn.disabled = selectedFiles.length === 0;
+  if (selectedFiles.length > 0) {
+    footerStatus.textContent = 'STATUS: ' + selectedFiles.length + ' FILES STAGED';
+    footerStatus.style.color = 'var(--c-bold)';
+  } else {
+    footerStatus.textContent = 'STATUS: IDLE';
+    footerStatus.style.color = 'var(--c-dim)';
+  }
+}
+
+function updateFileList() {
+  if (selectedFiles.length === 0) {
+    fileList.innerHTML = '';
+    return;
+  }
+  const items = [];
+  for (let i = 0; i < selectedFiles.length; i++) {
+    const f = selectedFiles[i];
+    items.push(
+      `<div class="file-item">
+        <div class="file-header">
+          <span class="file-name">./${escapeHtml(f.name)}</span>
+          <span>
+            <span class="file-size">${formatSize(f.size)}</span>
+            <button type="button" class="remove-btn" onclick="removeFile(${i})">[x]</button>
+          </span>
+        </div>
+        <div class="progress-container">
+          <div id="bar-${i}" class="progress-bar"></div>
+        </div>
+        <span id="speed-${i}" class="speed-text">WAITING...</span>
+      </div>`
+    );
+  }
+  fileList.innerHTML = items.join('');
+}
+
+function removeFile(idx) {
+  selectedFiles.splice(idx, 1);
+  const dt = new DataTransfer();
+  selectedFiles.forEach(file => dt.items.add(file));
+  fileInput.files = dt.files;
+  updateFileList();
+  submitBtn.disabled = selectedFiles.length === 0;
+  if(selectedFiles.length === 0) {
+     footerStatus.textContent = 'STATUS: IDLE';
+  }
+}
+
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1048576).toFixed(1) + ' MB';
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// Upload Logic
+const form = document.getElementById('uploadForm');
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  submitBtn.disabled = true;
+  submitBtn.textContent = '[ UPLOAD IN PROGRESS... ]';
+  footerStatus.textContent = 'STATUS: UPLOADING...';
+  footerStatus.style.color = 'var(--c-yellow)';
+  
+  for (let i = 0; i < selectedFiles.length; i++) {
+    try {
+      await uploadFile(selectedFiles[i], i);
+    } catch (err) {
+      const sp = document.getElementById('speed-' + i);
+      if (sp) { 
+        sp.textContent = 'ERROR'; 
+        sp.style.color = 'red';
+      }
+    }
+  }
+  submitBtn.textContent = '[ PROCESS COMPLETE ]';
+  footerStatus.textContent = 'STATUS: DONE';
+  footerStatus.style.color = 'var(--c-green)';
+});
+
+function uploadFile(file, idx) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', window.location.pathname);
+    xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
+
+    const start = Date.now();
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        const pct = Math.min(100, (e.loaded / file.size) * 100);
+        const bar = document.getElementById('bar-' + idx);
+        if (bar) { bar.style.width = pct.toFixed(1) + '%'; }
+        
+        const elapsed = (Date.now() - start) / 1000;
+        let mbps = 0;
+        if (elapsed > 0) { mbps = (e.loaded * 8) / (elapsed * 1000000); }
+        
+        const sp = document.getElementById('speed-' + idx);
+        if (sp) { sp.textContent = `[ ${pct.toFixed(0)}% ] @ ${mbps.toFixed(2)} Mbps`; }
+      }
+    };
+    xhr.onreadystatechange = function() {
+      if (xhr.readyState === XMLHttpRequest.DONE) {
+        if (xhr.status >= 200 && xhr.status < 300) { 
+            const sp = document.getElementById('speed-' + idx);
+            if(sp) { sp.textContent = "UPLOAD_COMPLETE"; sp.style.color = "var(--c-green)"; }
+            resolve(); 
+        } else { reject(new Error('Upload failed')); }
+      }
+    };
+    xhr.send(file);
+  });
+}
+</script>
+</body>
+</html>

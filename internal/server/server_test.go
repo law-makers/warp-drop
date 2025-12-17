@@ -6,11 +6,11 @@ import (
 	"os"
 	"testing"
 
-	"github.com/zulfikawr/warp-drop/internal/crypto"
+	"github.com/zulfikawr/warp/internal/crypto"
 )
 
 func TestServerValidAndInvalidToken(t *testing.T) {
-	tmpFile, err := ioutil.TempFile("", "warp-drop-test")
+	tmpFile, err := ioutil.TempFile("", "warp-test")
 	if err != nil { t.Fatal(err) }
 	defer os.Remove(tmpFile.Name())
 	_, _ = tmpFile.Write([]byte("hello"))
