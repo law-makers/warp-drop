@@ -4,6 +4,7 @@ import "time"
 
 const (
 	PathPrefix = "/d/"
+	UploadPathPrefix = "/u/"
 )
 
 var (

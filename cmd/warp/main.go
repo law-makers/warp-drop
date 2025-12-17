@@ -23,6 +23,8 @@ func main() {
 	switch sub {
 	case "send":
 		sendCmd(os.Args[2:])
+	case "host":
+		hostCmd(os.Args[2:])
 	case "receive":
 		receiveCmd(os.Args[2:])
 	case "-h", "--help":
@@ -34,7 +36,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Println("Usage:\n  warp send [flags] <path>\n  warp send --text <text>\n  warp send --stdin < file\n  warp receive [flags] <url>")
+	fmt.Println("Usage:\n  warp send [flags] <path>\n  warp send --text <text>\n  warp send --stdin < file\n  warp host [flags]\n  warp receive [flags] <url>")
 }
 
 func sendCmd(args []string) {
@@ -112,4 +114,35 @@ func receiveCmd(args []string) {
 	} else {
 		fmt.Printf("\nSaved to %s\n", file)
 	}
+}
+
+func hostCmd(args []string) {
+	fs := flag.NewFlagSet("host", flag.ExitOnError)
+	iface := fs.String("interface", "", "network interface")
+	fs.StringVar(iface, "i", "", "")
+	dest := fs.String("dest", ".", "destination directory for uploads")
+	fs.StringVar(dest, "d", ".", "")
+	noQR := fs.Bool("no-qr", false, "disable QR")
+	verbose := fs.Bool("verbose", false, "verbose logging")
+	fs.BoolVar(verbose, "v", false, "")
+	fs.Parse(args)
+
+	// Ensure destination exists
+	if err := os.MkdirAll(*dest, 0o755); err != nil {
+		log.Fatal(err)
+	}
+
+	tok, err := crypto.GenerateToken(nil)
+	if err != nil { log.Fatal(err) }
+	srv := &server.Server{InterfaceName: *iface, Token: tok, HostMode: true, UploadDir: *dest}
+	url, err := srv.Start()
+	if err != nil { log.Fatal(err) }
+	defer srv.Shutdown()
+
+	fmt.Printf("> Hosting uploads to '%s'\n> Token: %s\n\n", *dest, tok)
+	if !*noQR {
+		_ = ui.PrintQR(url)
+	}
+	fmt.Printf("Open this on another device to upload:\n%s\n", url)
+	select {}
 }
