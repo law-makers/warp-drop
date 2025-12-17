@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 
@@ -33,7 +34,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Println("Usage:\n  warp send [flags] <path>\n  warp receive [flags] <url>")
+	fmt.Println("Usage:\n  warp send [flags] <path>\n  warp send --text <text>\n  warp send --stdin < file\n  warp receive [flags] <url>")
 }
 
 func sendCmd(args []string) {
@@ -43,21 +44,46 @@ func sendCmd(args []string) {
 	noQR := fs.Bool("no-qr", false, "disable QR")
 	iface := fs.String("interface", "", "network interface")
 	fs.StringVar(iface, "i", "", "")
+	text := fs.String("text", "", "send text instead of file")
+	stdin := fs.Bool("stdin", false, "read from stdin")
 	verbose := fs.Bool("verbose", false, "verbose logging")
 	fs.BoolVar(verbose, "v", false, "")
 	fs.Parse(args)
-	if fs.NArg() < 1 {
-		log.Fatal("send requires a path")
-	}
-	path := fs.Arg(0)
 
 	tok, err := crypto.GenerateToken(nil)
 	if err != nil { log.Fatal(err) }
-	srv := &server.Server{InterfaceName: *iface, Token: tok, SrcPath: path}
+
+	var srv *server.Server
+
+	// Handle text sharing
+	if *text != "" {
+		srv = &server.Server{InterfaceName: *iface, Token: tok, TextContent: *text}
+	} else if *stdin {
+		// Read from stdin
+		data, err := io.ReadAll(os.Stdin)
+		if err != nil { log.Fatal(err) }
+		srv = &server.Server{InterfaceName: *iface, Token: tok, TextContent: string(data)}
+	} else {
+		// Handle file/directory
+		if fs.NArg() < 1 {
+			log.Fatal("send requires a path, --text, or --stdin")
+		}
+		path := fs.Arg(0)
+		srv = &server.Server{InterfaceName: *iface, Token: tok, SrcPath: path}
+	}
+
 	url, err := srv.Start()
 	if err != nil { log.Fatal(err) }
 	defer srv.Shutdown()
-	fmt.Printf("> Serving '%s'\n> Token: %s\n\n", path, tok)
+
+	// Display what we're serving
+	if srv.TextContent != "" {
+		fmt.Printf("> Serving text (%d bytes)\n", len(srv.TextContent))
+	} else {
+		fmt.Printf("> Serving '%s'\n", srv.SrcPath)
+	}
+	fmt.Printf("> Token: %s\n\n", tok)
+
 	if !*noQR {
 		_ = ui.PrintQR(url)
 	}
@@ -80,5 +106,10 @@ func receiveCmd(args []string) {
 	url := fs.Arg(0)
 	file, err := client.Receive(url, *out, *force, os.Stdout)
 	if err != nil { log.Fatal(err) }
-	fmt.Printf("\nSaved to %s\n", file)
+	if file == "(stdout)" {
+		// Text was output to stdout, just print newline
+		fmt.Println()
+	} else {
+		fmt.Printf("\nSaved to %s\n", file)
+	}
 }

@@ -12,6 +12,7 @@ import (
 )
 
 // Receive downloads from url to outputPath. If outputPath is empty, derive from headers or URL.
+// For text content (Content-Type: text/plain), outputs to stdout instead of saving to a file.
 func Receive(url string, outputPath string, force bool, progress io.Writer) (string, error) {
 	resp, err := http.Get(url)
 	if err != nil { return "", err }
@@ -19,6 +20,19 @@ func Receive(url string, outputPath string, force bool, progress io.Writer) (str
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("http status %d", resp.StatusCode)
 	}
+
+	// Check if this is text content (text/plain without attachment disposition)
+	contentType := resp.Header.Get("Content-Type")
+	disposition := resp.Header.Get("Content-Disposition")
+	isTextContent := strings.HasPrefix(contentType, "text/plain") && disposition == ""
+
+	if isTextContent {
+		// Output text to stdout
+		_, err := io.Copy(os.Stdout, resp.Body)
+		if err != nil { return "", err }
+		return "(stdout)", nil
+	}
+
 	name := filenameFromResponse(resp)
 	if name == "" {
 		name = path.Base(resp.Request.URL.Path)
