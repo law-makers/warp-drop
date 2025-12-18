@@ -1,8 +1,11 @@
 package server
 
 import (
+	"context"
 	"crypto/tls"
 	_ "embed"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +48,12 @@ type Server struct {
 	Port          int
 	httpServer    *http.Server
 	advertiser    *discovery.Advertiser
+	chunkTimes    sync.Map // filename -> *chunkStat
+}
+
+type chunkStat struct {
+	mu       sync.Mutex
+	duration time.Duration
 }
 
 // tcpKeepAliveListener sets TCP keepalive and optimizes socket for high throughput
@@ -79,6 +89,8 @@ func (s *Server) Start() (string, error) {
 	s.ip = ip
 
 	mux := http.NewServeMux()
+	// Health endpoint for realtime status checks
+	mux.HandleFunc("/health", s.handleHealth)
 	if s.HostMode {
 		mux.HandleFunc(protocol.UploadPathPrefix, s.handleUpload)
 	} else {
@@ -144,6 +156,36 @@ func (s *Server) Start() (string, error) {
 		return fmt.Sprintf("http://%s:%d%s%s", ip.String(), s.Port, protocol.UploadPathPrefix, s.Token), nil
 	}
 	return fmt.Sprintf("http://%s:%d%s%s", ip.String(), s.Port, protocol.PathPrefix, s.Token), nil
+}
+
+// handleHealth returns a simple JSON payload indicating the server is alive.
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	// Prevent caching to ensure fresh status on each request
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
+	resp := map[string]interface{}{
+		"status": "ok",
+	}
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// handleManifest advertises upload parameters (chunk size, max concurrency).
+func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
+	resp := map[string]interface{}{
+		"chunk_size":    2 * 1024 * 1024, // 2MB default chunk size
+		"max_concurrent": 3,              // parallel workers hint
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
@@ -213,10 +255,17 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 
 // handleUpload serves a simple HTML form on GET and accepts multipart file uploads on POST.
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
-	// Expect /u/{token}
-	p := strings.TrimPrefix(r.URL.Path, protocol.UploadPathPrefix)
-	if p != s.Token {
+	// Expect /u/{token} or /u/{token}/manifest
+	seg := strings.TrimPrefix(r.URL.Path, protocol.UploadPathPrefix)
+	seg = strings.TrimPrefix(seg, "/")
+	parts := strings.Split(seg, "/")
+	if len(parts) == 0 || parts[0] != s.Token {
 		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	if len(parts) > 1 && parts[1] == "manifest" {
+		s.handleManifest(w, r)
 		return
 	}
 
@@ -368,8 +417,7 @@ func findUniqueFilename(dir, name string) string {
 // This eliminates multipart parsing overhead for maximum speed
 func (s *Server) handleRawUpload(w http.ResponseWriter, r *http.Request, encodedFilename string) {
 	requestStart := time.Now()
-	
-	// SECURITY: Enforce 10GB upload limit
+
 	const MaxUploadSize = 10 << 30 // 10GB
 	if r.ContentLength > MaxUploadSize {
 		http.Error(w, "file too large", http.StatusRequestEntityTooLarge)
@@ -401,68 +449,129 @@ func (s *Server) handleRawUpload(w http.ResponseWriter, r *http.Request, encoded
 		return
 	}
 	
-	// PRODUCTION FIX #1: Prevent file collisions
-	outPath := findUniqueFilename(dest, name)
-	actualFilename := filepath.Base(outPath)
-	
-	// Create file with secure permissions
-	f, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	// Optional chunked upload support via X-Upload-Offset
+	offsetHeader := r.Header.Get("X-Upload-Offset")
+	chunked := offsetHeader != ""
+	var uploadOffset int64
+	var totalSize int64
+	if chunked {
+		var err error
+		uploadOffset, err = strconv.ParseInt(offsetHeader, 10, 64)
+		if err != nil || uploadOffset < 0 {
+			http.Error(w, "invalid offset", http.StatusBadRequest)
+			return
+		}
+		if totalHeader := r.Header.Get("X-Upload-Total"); totalHeader != "" {
+			if total, err := strconv.ParseInt(totalHeader, 10, 64); err == nil && total > 0 {
+				totalSize = total
+			}
+		}
+	}
+
+	// Resolve destination path
+	var outPath string
+	var actualFilename string
+	if chunked {
+		outPath = filepath.Join(dest, name)
+		actualFilename = filepath.Base(outPath)
+	} else {
+		outPath = findUniqueFilename(dest, name)
+		actualFilename = filepath.Base(outPath)
+	}
+
+	// Open file
+	flags := os.O_CREATE | os.O_WRONLY
+	if !chunked {
+		flags |= os.O_TRUNC
+	}
+	f, err := os.OpenFile(outPath, flags, 0o600)
 	if err != nil {
-		log.Printf("Failed to create file %s: %v", actualFilename, err)
+		log.Printf("Failed to open file %s: %v", actualFilename, err)
 		http.Error(w, "disk error", http.StatusInternalServerError)
 		return
 	}
-	
-	// PRODUCTION FIX #2: Clean up zombie files on disconnect
+
+	// Clean-up only for non-chunked uploads
 	success := false
 	defer func() {
 		f.Close()
-		if !success {
+		if !success && !chunked {
 			os.Remove(outPath)
 			log.Printf("Upload canceled/failed: deleted incomplete file %s", actualFilename)
 		}
 	}()
-	
-	// CRITICAL OPTIMIZATION: Pre-allocate disk space
-	// This prevents file fragmentation and reduces metadata updates
-	// Massive performance gain for large files on SSDs
-	if r.ContentLength > 0 {
-		if err := f.Truncate(r.ContentLength); err != nil {
-			log.Printf("Failed to pre-allocate space for %s: %v", actualFilename, err)
-			// Non-fatal, continue anyway
+
+	// Pre-allocate when possible
+	if chunked {
+		if totalSize > 0 && uploadOffset == 0 {
+			_ = f.Truncate(totalSize)
+		}
+		if _, err := f.Seek(uploadOffset, 0); err != nil {
+			http.Error(w, "seek error", http.StatusInternalServerError)
+			return
 		}
 	}
-	
-	// Get buffer from pool (zero allocation)
+	if !chunked && r.ContentLength > 0 {
+		if err := f.Truncate(r.ContentLength); err != nil {
+			log.Printf("Failed to pre-allocate space for %s: %v", actualFilename, err)
+		}
+	}
+
 	bufPtr := bufferPool.Get().(*[]byte)
 	defer bufferPool.Put(bufPtr)
 	buf := *bufPtr
-	
-	// ZERO-PARSING STREAM: Network → Disk
-	// No boundary scanning, no base64 decoding, pure binary transfer
+
+	if chunked && uploadOffset == 0 {
+		if totalSize > 0 {
+			log.Printf("receiving %s (%s)", actualFilename, formatBytes(totalSize))
+		} else {
+			log.Printf("receiving %s", actualFilename)
+		}
+	}
+	if !chunked {
+		if r.ContentLength > 0 {
+			log.Printf("receiving %s (%s)", actualFilename, formatBytes(r.ContentLength))
+		} else {
+			log.Printf("receiving %s", actualFilename)
+		}
+	}
+
 	n, err := io.CopyBuffer(f, r.Body, buf)
+	ctxErr := r.Context().Err()
 	if err != nil {
+		if ctxErr != nil || errors.Is(err, context.Canceled) {
+			log.Printf("receiving paused %s", actualFilename)
+			return
+		}
 		log.Printf("Upload stream failed for %s: %v", actualFilename, err)
 		http.Error(w, "stream error", http.StatusInternalServerError)
 		return
 	}
-	
-	// Mark success before defer runs
+
 	success = true
-	
-	// Calculate transfer speed
-	duration := time.Since(requestStart).Seconds()
+
+	dur := time.Since(requestStart)
 	mbps := 0.0
-	if duration > 0 {
-		mbps = (float64(n) * 8) / (duration * 1_000_000)
+	if dur.Seconds() > 0 {
+		mbps = (float64(n) * 8) / (dur.Seconds() * 1_000_000)
 	}
-	
-	log.Printf("%s, %s received in %.2fs (%.1f Mbps)", actualFilename, formatBytes(n), duration, mbps)
-	
-	// Send success response
+
+	if chunked {
+		totalDur := s.addChunkDuration(actualFilename, dur)
+		if totalSize > 0 && uploadOffset+n >= totalSize {
+			log.Printf("received %s in %.2fs", actualFilename, totalDur.Seconds())
+		}
+	} else {
+		log.Printf("received %s in %.2fs (%.1f Mbps)", actualFilename, dur.Seconds(), mbps)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, `{"success":true,"filename":"%s","size":%d}`, actualFilename, n)
+	if chunked {
+		fmt.Fprintf(w, `{"success":true,"filename":"%s","received":%d}`, actualFilename, n)
+	} else {
+		fmt.Fprintf(w, `{"success":true,"filename":"%s","size":%d}`, actualFilename, n)
+	}
 }
 
 // formatBytes formats bytes into human-readable string
@@ -477,6 +586,24 @@ func formatBytes(bytes int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+func (s *Server) addChunkDuration(name string, d time.Duration) time.Duration {
+	cs := s.getChunkStat(name)
+	return cs.add(d)
+}
+
+func (s *Server) getChunkStat(name string) *chunkStat {
+	val, _ := s.chunkTimes.LoadOrStore(name, &chunkStat{})
+	return val.(*chunkStat)
+}
+
+func (c *chunkStat) add(d time.Duration) time.Duration {
+	c.mu.Lock()
+	c.duration += d
+	res := c.duration
+	c.mu.Unlock()
+	return res
 }
 
 // Shutdown stops the server.
